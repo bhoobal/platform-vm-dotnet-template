@@ -19,7 +19,7 @@ Create a reusable solution that allows a team to:
     Build, Checkout bicep and deployment module, run unit test, publish , deploy to dev and production based on condition
  Have basic security and observability built in
     [] Deploy VM in private subnet 
-    [] Data collection - CPU, memory, disk usage collection metrics
+    [] Data collection - CPU, memory, disk usage collection
 
 ### Requirements
 Your solution should include:

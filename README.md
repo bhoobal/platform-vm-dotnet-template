@@ -3,6 +3,7 @@
 Objective
 - Requirements are from [Scenario](./platform-scenario.md)
 1. Build a running a .NET service on an Azure VM, with logs aggregated through the **Azure Monitor Agent (AMA)** into Log Analytics. 
+[How to build and run test](./demo-saas-service-app/README.md)
 
 2. Build and run unit tests in azure pipeline
 
@@ -11,9 +12,9 @@ Objective
 4. Deploy .net service into dev and prod environment
 
 Provide a short README that explains:
- What your solution does
- How a team would use it
- Any assumptions or trade-offs
+- What your solution does
+- How a team would use it
+- Any assumptions or trade-offs
 
 
 
@@ -54,7 +55,7 @@ app. Query it in Log Analytics:
 
 ```kusto
 Syslog
-| where Facility == "local0" and ProcessName == "sampleservice"
+| where Facility == "local0" and ProcessName == "SaasService"
 | order by TimeGenerated desc
 
 Heartbeat | where Category == "Azure Monitor Agent" | summarize max(TimeGenerated) by Computer
