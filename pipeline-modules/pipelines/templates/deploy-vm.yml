@@ -1,0 +1,97 @@
+parameters:
+  - name: environment
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: resourceGroup
+    type: string
+
+jobs:
+  - deployment: Deploy_${{ parameters.environment }}
+    displayName: Deploy (${{ parameters.environment }})
+    environment: ${{ parameters.environment }}   # approvals/checks live on the Environment
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: drop
+
+            # Safety check 1: preview exactly what infra will change.
+            - task: AzureCLI@2
+              displayName: Infra what-if
+              inputs:
+                azureSubscription: ${{ parameters.serviceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  az deployment group what-if \
+                    --resource-group ${{ parameters.resourceGroup }} \
+                    --parameters $(Pipeline.Workspace)/drop/repo/pipeline-modules/infra/parameters/${{ parameters.environment }}.bicepparam
+
+            - task: AzureCLI@2
+              displayName: Deploy infra (Bicep)
+              inputs:
+                azureSubscription: ${{ parameters.serviceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  outputs=$(az deployment group create \
+                    --resource-group ${{ parameters.resourceGroup }} \
+                    --name "deploy-$(Build.BuildId)" \
+                    --parameters $(Pipeline.Workspace)/drop/repo/pipeline-modules/infra/parameters/${{ parameters.environment }}.bicepparam \
+                    --query properties.outputs -o json)
+                  echo "##vso[task.setvariable variable=vmName]$(echo "$outputs" | jq -r .vmName.value)"
+                  echo "##vso[task.setvariable variable=storageAccount]$(echo "$outputs" | jq -r .storageAccountName.value)"
+                  echo "##vso[task.setvariable variable=container]$(echo "$outputs" | jq -r .artifactContainer.value)"
+                  echo "##vso[task.setvariable variable=workspaceName]$(echo "$outputs" | jq -r .workspaceName.value)"
+                  echo "##vso[task.setvariable variable=keyVaultName]$(echo "$outputs" | jq -r .keyVaultName.value)"
+
+            - task: AzureCLI@2
+              displayName: Upload release artifact
+              inputs:
+                azureSubscription: ${{ parameters.serviceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  az storage blob upload --auth-mode login \
+                    --account-name $(storageAccount) --container-name $(container) \
+                    --name app-$(Build.BuildId).zip \
+                    --file $(Pipeline.Workspace)/drop/app-$(Build.BuildId).zip --overwrite
+
+            # Safety check 2: on-VM health gate with automatic rollback to the previous release.
+            - task: AzureCLI@2
+              displayName: Deploy to VM and health-check (rolls back on failure)
+              inputs:
+                azureSubscription: ${{ parameters.serviceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  out=$(az vm run-command invoke \
+                    --resource-group ${{ parameters.resourceGroup }} --name $(vmName) \
+                    --command-id RunShellScript \
+                    --scripts @$(Pipeline.Workspace)/drop/repo/scripts/deploy-on-vm.sh \
+                    --parameters $(storageAccount) $(container) app-$(Build.BuildId).zip $(Build.BuildId) $(appPort) $(keyVaultName) api-key \
+                    --query "value[0].message" -o tsv)
+                  echo "$out"
+                  echo "$out" | grep -q "DEPLOY_OK" || { echo "##vso[task.logissue type=error]Deploy failed or rolled back"; exit 1; }
+
+            # Safety check 3: confirm logs are actually arriving in Log Analytics.
+            - task: AzureCLI@2
+              displayName: Verify AMA is shipping logs
+              inputs:
+                azureSubscription: ${{ parameters.serviceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  az extension add --name log-analytics --only-show-errors
+                  wsid=$(az monitor log-analytics workspace show -g ${{ parameters.resourceGroup }} -n $(workspaceName) --query customerId -o tsv)
+                  for i in $(seq 1 10); do
+                    n=$(az monitor log-analytics query --workspace "$wsid" \
+                      --analytics-query "Syslog | where Facility == 'local0' and TimeGenerated > ago(15m) | count" \
+                      --query "[0].Count" -o tsv || echo 0)
+                    echo "attempt $i: $n app log lines in last 15m"
+                    [ "${n:-0}" -gt 0 ] && exit 0
+                    sleep 30
+                  done
+                  echo "##vso[task.logissue type=warning]No app logs seen in Log Analytics yet (ingestion can lag a few minutes)"

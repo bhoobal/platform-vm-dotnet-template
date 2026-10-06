@@ -1,0 +1,116 @@
+# Azure DevOps pipeline: validate -> build -> deploy dev -> deploy prod (approval).
+# Deploys to a VM with no inbound access: artifacts go to blob storage, then
+# `az vm run-command` runs scripts/deploy-on-vm.sh on the VM.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    exclude: [README.md]
+
+pr:
+  branches:
+    include: [main]
+
+resources:
+  repositories:
+    - repository: pipelineModules
+      type: git
+      name: pipeline-modules
+      ref: refs/tags/v1.2.0
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - name: devServiceConnection
+    value: sc-saas-svc-dev          # ARM service connection (workload identity federation)
+  - name: prodServiceConnection
+    value: sc-saas-svc-prod
+  - name: devResourceGroup
+    value: rg-saas-svc-dev
+  - name: prodResourceGroup
+    value: rg-saas-svc-prod
+  - name: appPort
+    value: 8080
+
+stages:
+  - stage: Build
+    displayName: Build and run unit tests
+    jobs:
+      - job: Build
+        steps:
+          - checkout: self
+            path: s/app
+
+          - checkout: pipelineModules
+            path: s/pipeline-modules
+
+          - task: UseDotNet@2
+            displayName: Use .NET 8 SDK
+            inputs:
+              packageType: sdk
+              version: 8.x
+
+          - script: dotnet test "$(Pipeline.Workspace)/s/app/demo-saas-service-app/tests/SaasService.Tests.csproj" --configuration Release
+            displayName: Unit tests
+
+          - script: |
+              dotnet publish "$(Pipeline.Workspace)/s/app/demo-saas-service-app/src/SaasService.csproj" -c Release -r linux-x64 \
+                --self-contained true -p:PublishSingleFile=true -o $(Build.ArtifactStagingDirectory)/publish
+              cd $(Build.ArtifactStagingDirectory)/publish && zip -qr ../app-$(Build.BuildId).zip .
+            displayName: Publish self-contained linux-x64 (no runtime needed on the VM)
+
+          - script: |
+              az bicep install
+              az bicep build --file "$(Pipeline.Workspace)/s/pipeline-modules/infra/main.bicep" --stdout > /dev/null
+              for f in "$(Pipeline.Workspace)/s/pipeline-modules/infra/parameters/"*.bicepparam; do az bicep build-params --file "$f" --stdout > /dev/null; done
+            displayName: Bicep lint and compile (fails on linter errors) - runs linter as part of build
+
+          - script: |
+              pip install --quiet checkov
+              checkov -d "$(Pipeline.Workspace)/s/pipeline-modules/infra" --framework bicep --quiet --compact --soft-fail
+            displayName: IaC security scan (Checkov, report-only)
+
+          - task: CopyFiles@2
+            displayName: Stage infrastructure
+            inputs:
+              SourceFolder: $(Pipeline.Workspace)/s/pipeline-modules
+              Contents: |
+                infra/**
+              TargetFolder: $(Build.ArtifactStagingDirectory)/repo/pipeline-modules
+
+          - task: CopyFiles@2
+            displayName: Stage deploy script
+            inputs:
+              SourceFolder: $(Pipeline.Workspace)/s/app/scripts
+              Contents: deploy-on-vm.sh
+              TargetFolder: $(Build.ArtifactStagingDirectory)/repo/scripts
+
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: drop
+            displayName: Publish artifact
+            # builtin task to package artifact for later use 
+            # file $(Pipeline.Workspace)/drop/app-$(Build.BuildId).zip
+
+  - stage: Dev
+    displayName: Deploy to dev
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - template: pipelines/templates/deploy-vm.yml@pipelineModules
+        parameters:
+          environment: dev
+          serviceConnection: $(devServiceConnection)
+          resourceGroup: $(devResourceGroup)
+
+  # Gate: configure "Approvals and checks" on the `prod` Environment in Azure DevOps.
+  - stage: Prod
+    displayName: Deploy to prod
+    dependsOn: Dev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - template: pipelines/templates/deploy-vm.yml@pipelineModules
+        parameters:
+          environment: prod
+          serviceConnection: $(prodServiceConnection)
+          resourceGroup: $(prodResourceGroup)
