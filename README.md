@@ -1,9 +1,7 @@
-# Platform VM Template (.NET on a Linux VM with Azure Monitor Agent)
-
-SaaS CI/CD solution
+# CICD for .NET service on a Linux VM with Azure Monitor Agent
 
 Objective
-
+- Requirements are from [Scenario](./platform-scenario.md)
 1. Build a running a .NET service on an Azure VM, with logs aggregated through the **Azure Monitor Agent (AMA)** into Log Analytics. 
 
 2. Build and run unit tests in azure pipeline
@@ -141,9 +139,9 @@ One-time setup:
 
 Per service:
 
-1. Replace `demo-saas-service-app/src` with your service. Keep `GET /health` returning 200, log to stdout, and keep the executable name `SampleService` (or update `app.service` in the `pipeline-modules` repo's `infra/modules/vm.bicep` and `deploy-on-vm.sh`).
-2. Edit `infra/parameters/*.bicepparam` in the `pipeline-modules` repo: `workload`, `alertEmail`, `vmSize`, `adminSshPublicKey`.
-3. Edit the variables at the top of `pipelines/azure-pipelines.yml`.
+1. Replace `demo-saas-service-app/src` with your service. Keep `GET /health` returning 200, log to stdout, and keep the executable name `SaasService` (or update `app.service` in the `pipeline-modules` repo's `infra/modules/vm.bicep` and `deploy-on-vm.sh`).
+2. Edit `infra/parameters/*.bicepparam` in the `pipeline-modules` repo: `workload`, `alertEmail`, `vmSize`, `adminSshPublicKey`. - These bicep parmeter variables can be extended as overrides than standard defaults.
+3. Add and Edit the variables at the top of `pipelines/azure-pipelines.yml`.
 4. Create the pipeline, merge to `main`.
 
 ### Bootstrap the API key
@@ -185,7 +183,7 @@ dotnet test demo-saas-service-app/tests/SaasService.Tests.csproj
 
 ## Trade-offs and what I'd do next
 
-- **Single VM = no HA.** Deploys restart the service (brief outage) and a VM failure means downtime. Next step: a VM Scale Set or availability zones behind a load balancer, with rolling upgrades.
+- **Single VM = no HA.** Deploys restart the service (brief outage) and a VM failure means downtime. Next step: a VVMSS or availability zones behind a load balancer, with rolling upgrades.
 - **Syslog, not custom text logs.** Syslog via systemd needs no custom table and works with a stock DCR. The trade-off is single-line, unstructured messages. For structured JSON logs, switch to the DCR *Custom Text Logs* source with a custom table (requires a DCE and table definition).
 - **`run-command` deploys.** No SSH, no inbound, no self-hosted agent, and it is auditable in the activity log. It is slower and less featureful than a proper agent-based release tool. Azure DevOps Environment VM resources or a self-hosted agent in the VNet are the alternatives.
 - **NAT gateway costs money** (~€30/month plus data). It is needed because default outbound access is retired for new subnets. Private Link for storage and Azure Monitor (AMPLS) would remove the need for public egress and is the right answer in a regulated setup.
