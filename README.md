@@ -1,5 +1,7 @@
 # Platform VM Template (.NET on a Linux VM with Azure Monitor Agent)
 
+SaaS CI/CD solution
+
 Objective
 
 1. Build a running a .NET service on an Azure VM, with logs aggregated through the **Azure Monitor Agent (AMA)** into Log Analytics. 
